@@ -14,7 +14,13 @@ load_dotenv()
 
 # Configure Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel(
+    'gemini-2.5-flash',
+    generation_config=genai.GenerationConfig(
+        max_output_tokens=1_000_000,
+        temperature=0.7,
+    )
+)
 
 class State(TypedDict):
     code1: str
@@ -129,19 +135,11 @@ def generate_tests(state):
     test_prompt = f"""
     Based on this analysis:
     {state['analysis']}
-    
-    Generate 8-10 diverse test cases for a function with {num_params} parameter(s).
-    Include: normal cases, edge cases, boundary values, error cases.
-    
-    Return ONLY a JSON array of test inputs, like:
-    [
-        {{"input": [5], "description": "normal case"}},
-        {{"input": [0], "description": "zero"}},
-        {{"input": [-1], "description": "negative"}},
-        {{"input": [1000], "description": "large value"}}
-    ]
-    
-    For functions with multiple params, use: {{"input": [arg1, arg2], "description": "..."}}
+
+    Generate exactly 5 test cases for a function with {num_params} parameter(s).
+
+    Return ONLY valid JSON array, no markdown, no explanation:
+    [{{"input": [5], "description": "normal"}}, {{"input": [0], "description": "zero"}}]
     """
     
     response = model.generate_content(test_prompt)
@@ -155,11 +153,13 @@ def generate_tests(state):
     
     try:
         new_tests = json.loads(response_text)
+        if isinstance(new_tests, dict) and "tests" in new_tests:
+            new_tests = new_tests["tests"]
         state["test_cases"].extend(new_tests)
         print(f"Generated {len(new_tests)} new test cases (total: {len(state['test_cases'])})")
-    except json.JSONDecodeError as e:
+    except (json.JSONDecodeError, ValueError) as e:
         print(f"Failed to parse test cases: {e}")
-        print(f"Response: {response_text[:200]}")
+        print(f"Response text: {response_text}")
     
     return state
 
@@ -349,7 +349,7 @@ def factorial(n):
         "analysis": "",
         "test_cases": [],
         "iteration": 1,
-        "max_iterations": 3,
+        "max_iterations": 5,
         "coverage_gaps": []
     })
     
