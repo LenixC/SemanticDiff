@@ -274,7 +274,7 @@ def should_continue(state):
 
 
 def finalize(state):
-    """Produce final report."""
+    """Produce final report and request semantic diff from Gemini based on the final state."""
     print("\n" + "="*60)
     print("SEMANTIC DIFF ANALYSIS COMPLETE")
     print("="*60)
@@ -283,6 +283,7 @@ def finalize(state):
     print(f"Differences found: {len(state['differences'])}")
     print(f"Final confidence: {state['confidence']:.2%}")
     
+    # If there are semantic differences, print them
     if state['differences']:
         print("\n❌ SEMANTIC DIFFERENCES DETECTED:")
         for i, diff in enumerate(state['differences'], 1):
@@ -293,11 +294,48 @@ def finalize(state):
     else:
         print("\n✓ No semantic differences detected (within tested scope)")
     
+    # If there are coverage gaps, print them
     if state['coverage_gaps']:
-        print("\n⚠️  Coverage gaps remaining:")
         for gap in state['coverage_gaps']:
             print(f"  - {gap}")
     
+    print("\nRequesting semantic diff from Gemini...")
+
+    diff_prompt = f"""
+    Compare the following two Python code snippets for **semantic differences**—that is, how their execution behavior and results might differ, based on the final analysis and test results. 
+
+    Code 1:
+    ```python
+    {state['code1']}
+    ```
+
+    Code 2:
+    ```python
+    {state['code2']}
+    ```
+
+    **Final Analysis Context:**
+    - Differences identified: {len(state['differences'])} semantic differences found.
+    - Test cases run: {len(state['test_cases'])}
+    - Coverage gaps: {json.dumps(state['coverage_gaps'], indent=2)}
+    - Edge cases explored: {state['test_cases']}
+    
+    **Instructions:**
+    Please output a diff-like format (diff or git diff) that highlights lines that
+    are semantically different in concept. Do not add any additional commentary.
+    Only reply with the diff-like final output.
+    """
+    
+    # Ask Gemini to return the semantic diff
+    response = model.generate_content(diff_prompt)
+    diff_result = response.text.strip()
+    
+    if diff_result:
+        print("\nSemantic Code Diff Result (from Gemini):\n")
+        print(diff_result)
+    else:
+        print("\nNo semantic diff result returned from Gemini.")
+
     return state
 
 
@@ -354,9 +392,9 @@ def factorial(n):
     })
     
     # Visualize the graph
-    try:
-        from IPython.display import Image, display
-        display(Image(app.get_graph().draw_mermaid_png()))
-    except:
-        print("\nGraph structure:")
-        print(app.get_graph().draw_ascii())
+    #try:
+    #    from IPython.display import Image, display
+    #    display(Image(app.get_graph().draw_mermaid_png()))
+    #except:
+    #    print("\nGraph structure:")
+    #    print(app.get_graph().draw_ascii())
