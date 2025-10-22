@@ -8,17 +8,19 @@ import tempfile
 import sys
 import json
 import ast
+import yaml
 
-# Load environment variables
 load_dotenv()
 
-# Configure Gemini
+with open("prompts.yaml", "r") as f:
+    PROMPTS = yaml.safe_load(f)
+
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel(
-    'gemini-2.5-flash',
+    PROMPTS['model_config']['default_model'],
     generation_config=genai.GenerationConfig(
-        max_output_tokens=1_000_000,
-        temperature=0.7,
+        max_output_tokens=PROMPTS['model_config']['max_output_tokens'],
+        temperature=PROMPTS['model_config']['default_temperature'],
     )
 )
 
@@ -34,20 +36,17 @@ class State(TypedDict):
     coverage_gaps: List[str]
 
 def execute_code_with_input(code, test_input, timeout=5):
-    """Execute code with specific input and return output."""
-    # Wrap code to accept input and return output
+    """Execute code with specific input in isolated subprocess and return output."""
     wrapped_code = f"""
 import json
 import sys
 
 {code}
 
-# Get the function name from the code
 import ast
 tree = ast.parse('''{code}''')
 func_name = [node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)][0]
 
-# Execute with test input
 test_input = {repr(test_input)}
 try:
     result = eval(f"{{func_name}}(*test_input)" if isinstance(test_input, (list, tuple)) else f"{{func_name}}(test_input)")
@@ -87,30 +86,12 @@ def analyze_code(state):
     previous_analysis = f"\n\nPrevious analysis:\n{state['analysis']}" if state['analysis'] else ""
     coverage_info = f"\n\nCoverage gaps identified:\n{json.dumps(state['coverage_gaps'], indent=2)}" if state['coverage_gaps'] else ""
     
-    prompt = f"""
-    Compare these two Python code snippets for semantic differences:
-    
-    Code 1:
-    ```python
-    {state['code1']}
-    ```
-    
-    Code 2:
-    ```python
-    {state['code2']}
-    ```
-    
-    {previous_analysis}
-    {coverage_info}
-    
-    Analyze:
-    1. What are the semantic differences (behavior, not just syntax)?
-    2. What edge cases might expose differences?
-    3. What input ranges should be tested?
-    4. Are there boundary conditions, error cases, or special values to consider?
-    
-    Be specific and technical.
-    """
+    prompt = PROMPTS['analysis']['template'].format(
+        code1=state['code1'],
+        code2=state['code2'],
+        previous_analysis=previous_analysis,
+        coverage_info=coverage_info
+    )
     
     response = model.generate_content(prompt)
     state["analysis"] = response.text
@@ -132,17 +113,13 @@ def generate_tests(state):
         func_name = "unknown"
         num_params = 1
     
-    test_prompt = f"""
-    Based on this analysis:
-    {state['analysis']}
-
-    Generate exactly 5 test cases for a function with {num_params} parameter(s).
-
-    Return ONLY valid JSON array, no markdown, no explanation:
-    [{{"input": [5], "description": "normal"}}, {{"input": [0], "description": "zero"}}]
-    """
+    prompt = PROMPTS['test_generation']['template'].format(
+        analysis=state['analysis'],
+        num_tests=5,
+        num_params=num_params
+    )
     
-    response = model.generate_content(test_prompt)
+    response = model.generate_content(prompt)
     response_text = response.text.strip()
     
     # Extract JSON from markdown code blocks if present
@@ -202,29 +179,15 @@ def evaluate_coverage(state):
     """Adversarially evaluate test coverage and identify gaps."""
     print("Evaluating test coverage...")
     
-    coverage_prompt = f"""
-    Given this code comparison analysis:
-    {state['analysis']}
+    prompt = PROMPTS['coverage_evaluation']['template'].format(
+        analysis=state['analysis'],
+        num_differences=len(state['differences'])
+    )
     
-    And these test cases that were run:
-    [{{"gap": "description of what's not tested", "why_important": "why this matters"}}]
-    
-    Differences found: {len(state['differences'])} differences
-    
-    Adversarially evaluate:
-    1. What edge cases are NOT covered?
-    2. What boundary conditions are missing?
-    3. What error scenarios haven't been tested?
-    4. Are there input combinations that might reveal hidden differences?
-    
-    Be critical and specific. Return a JSON array of coverage gaps:
-    [{{"gap": "description of what's not tested", "why_important": "why this matters"}}]
-    """
-    
-    response = model.generate_content(coverage_prompt)
+    response = model.generate_content(prompt)
     response_text = response.text.strip()
     
-    # Extract JSON
+    # Extract JSON from markdown code blocks
     if "```json" in response_text:
         response_text = response_text.split("```json")[1].split("```")[0].strip()
     elif "```" in response_text:
@@ -235,12 +198,11 @@ def evaluate_coverage(state):
         state["coverage_gaps"] = [g.get("gap", str(g)) for g in gaps]
         print(f"Identified {len(state['coverage_gaps'])} coverage gaps")
         
-        # Calculate confidence based on coverage and differences
+        # Calculate confidence: increases with tests, decreases with gaps
         num_tests = len(state["test_cases"])
         num_gaps = len(state["coverage_gaps"])
         num_diffs = len(state["differences"])
         
-        # Confidence increases with more tests, decreases with more gaps
         base_confidence = min(0.95, num_tests / 15)  # Max at 15+ tests
         gap_penalty = min(0.3, num_gaps * 0.05)      # -5% per gap, max -30%
         
@@ -250,7 +212,7 @@ def evaluate_coverage(state):
         
     except json.JSONDecodeError as e:
         print(f"Failed to parse coverage gaps: {e}")
-        state["confidence"] = 0.6  # Moderate confidence if analysis fails
+        state["confidence"] = 0.6
     
     state["iteration"] += 1
     return state
@@ -274,7 +236,7 @@ def should_continue(state):
 
 
 def finalize(state):
-    """Produce final report and request semantic diff from Gemini based on the final state."""
+    """Produce final report and request semantic diff from Gemini."""
     print("\n" + "="*60)
     print("SEMANTIC DIFF ANALYSIS COMPLETE")
     print("="*60)
@@ -283,7 +245,6 @@ def finalize(state):
     print(f"Differences found: {len(state['differences'])}")
     print(f"Final confidence: {state['confidence']:.2%}")
     
-    # If there are semantic differences, print them
     if state['differences']:
         print("\n❌ SEMANTIC DIFFERENCES DETECTED:")
         for i, diff in enumerate(state['differences'], 1):
@@ -294,40 +255,22 @@ def finalize(state):
     else:
         print("\n✓ No semantic differences detected (within tested scope)")
     
-    # If there are coverage gaps, print them
     if state['coverage_gaps']:
         for gap in state['coverage_gaps']:
             print(f"  - {gap}")
     
     print("\nRequesting semantic diff from Gemini...")
 
-    diff_prompt = f"""
-    Compare the following two Python code snippets for **semantic differences**—that is, how their execution behavior and results might differ, based on the final analysis and test results. 
-
-    Code 1:
-    ```python
-    {state['code1']}
-    ```
-
-    Code 2:
-    ```python
-    {state['code2']}
-    ```
-
-    **Final Analysis Context:**
-    - Differences identified: {len(state['differences'])} semantic differences found.
-    - Test cases run: {len(state['test_cases'])}
-    - Coverage gaps: {json.dumps(state['coverage_gaps'], indent=2)}
-    - Edge cases explored: {state['test_cases']}
+    prompt = PROMPTS['semantic_diff']['template'].format(
+        code1=state['code1'],
+        code2=state['code2'],
+        num_differences=len(state['differences']),
+        num_tests=len(state['test_cases']),
+        coverage_gaps=json.dumps(state['coverage_gaps'], indent=2),
+        test_cases=state['test_cases']
+    )
     
-    **Instructions:**
-    Please output a diff-like format (diff or git diff) that highlights lines that
-    are semantically different in concept. Do not add any additional commentary.
-    Only reply with the diff-like final output.
-    """
-    
-    # Ask Gemini to return the semantic diff
-    response = model.generate_content(diff_prompt)
+    response = model.generate_content(prompt)
     diff_result = response.text.strip()
     
     if diff_result:
@@ -339,7 +282,7 @@ def finalize(state):
     return state
 
 
-# Build graph
+# Build LangGraph workflow
 graph = StateGraph(State)
 graph.add_node("analyze", analyze_code)
 graph.add_node("generate_tests", generate_tests)
@@ -362,7 +305,6 @@ app = graph.compile()
 
 
 if __name__ == "__main__":
-    # Test with factorial implementations
     code1 = """
 def factorial(n):
     if n <= 1:
@@ -378,7 +320,6 @@ def factorial(n):
     return result
 """
 
-    # Run the semantic diff
     result = app.invoke({
         "code1": code1,
         "code2": code2,
@@ -390,11 +331,3 @@ def factorial(n):
         "max_iterations": 5,
         "coverage_gaps": []
     })
-    
-    # Visualize the graph
-    #try:
-    #    from IPython.display import Image, display
-    #    display(Image(app.get_graph().draw_mermaid_png()))
-    #except:
-    #    print("\nGraph structure:")
-    #    print(app.get_graph().draw_ascii())

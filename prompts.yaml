@@ -1,0 +1,92 @@
+analysis:
+  template: |
+    Compare these two Python code snippets for semantic differences:
+    
+    Code 1:
+    ```python
+    {code1}
+    ```
+    
+    Code 2:
+    ```python
+    {code2}
+    ```
+    
+    {previous_analysis}
+    {coverage_info}
+    
+    Analyze:
+    1. What are the semantic differences (behavior, not just syntax)?
+    2. What edge cases might expose differences?
+    3. What input ranges should be tested?
+    4. Are there boundary conditions, error cases, or special values to consider?
+    
+    Be specific and technical.
+  version: "1.0.0"
+  description: "Initial semantic analysis of two code snippets"
+
+test_generation:
+  template: |
+    Based on this analysis:
+    {analysis}
+
+    Generate exactly {num_tests} test cases for a function with {num_params} parameter(s).
+
+    Return ONLY valid JSON array, no markdown, no explanation:
+    [{{"input": [5], "description": "normal"}}, {{"input": [0], "description": "zero"}}]
+  version: "1.0.0"
+  description: "Generate targeted test cases based on analysis"
+
+coverage_evaluation:
+  template: |
+    Given this code comparison analysis:
+    {analysis}
+    
+    And these test cases that were run:
+    [{{"gap": "description of what's not tested", "why_important": "why this matters"}}]
+    
+    Differences found: {num_differences} differences
+    
+    Adversarially evaluate:
+    1. What edge cases are NOT covered?
+    2. What boundary conditions are missing?
+    3. What error scenarios haven't been tested?
+    4. Are there input combinations that might reveal hidden differences?
+    
+    Be critical and specific. Return a JSON array of coverage gaps:
+    [{{"gap": "description of what's not tested", "why_important": "why this matters"}}]
+  version: "1.0.0"
+  description: "Adversarially evaluate test coverage and identify gaps"
+
+semantic_diff:
+  template: |
+    Compare the following two Python code snippets for **semantic differences**—that is, how their execution behavior and results might differ, based on the final analysis and test results. 
+
+    Code 1:
+    ```python
+    {code1}
+    ```
+
+    Code 2:
+    ```python
+    {code2}
+    ```
+
+    **Final Analysis Context:**
+    - Differences identified: {num_differences} semantic differences found.
+    - Test cases run: {num_tests}
+    - Coverage gaps: {coverage_gaps}
+    - Edge cases explored: {test_cases}
+    
+    **Instructions:**
+    Please output a diff-like format (diff or git diff) that highlights lines that
+    are semantically different in concept. Do not add any additional commentary.
+    Only reply with the diff-like final output.
+  version: "1.0.0"
+  description: "Generate final semantic diff visualization"
+
+# Model configuration
+model_config:
+  default_model: "gemini-2.5-flash"
+  default_temperature: 0.7
+  max_output_tokens: 1000000
