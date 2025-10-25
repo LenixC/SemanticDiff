@@ -60,29 +60,49 @@ coverage_evaluation:
 
 semantic_diff:
   template: |
-    Compare the following two Python code snippets for **semantic differences**—that is, how their execution behavior and results might differ, based on the final analysis and test results. 
-
+    You are analyzing two Python functions that have been tested extensively.
+    
     Code 1:
     ```python
     {code1}
     ```
-
+    
     Code 2:
     ```python
     {code2}
     ```
-
-    **Final Analysis Context:**
-    - Differences identified: {num_differences} semantic differences found.
-    - Test cases run: {num_tests}
-    - Coverage gaps: {coverage_gaps}
-    - Edge cases explored: {test_cases}
     
-    **Instructions:**
-    Please output a diff-like format (diff or git diff) that highlights lines that
-    are semantically different in concept. Do not add any additional commentary.
-    Only reply with the diff-like final output.
-  version: "1.0.0"
+    **Test Results:**
+    - {num_differences} behavioral differences were found during testing
+    - {num_tests} test cases were executed
+    - Coverage gaps remaining: {coverage_gaps}
+    
+    **Your Task:**
+    Produce a diff that shows ONLY the lines that cause semantic/behavioral differences.
+    Ignore refactoring, variable renames, or stylistic changes that don't affect behavior.
+    
+    Focus on:
+    - Lines that handle edge cases differently (missing keys, None values, empty collections)
+    - Lines with different error handling or validation logic
+    - Lines that compute results differently
+    
+    **Output Format:**
+    Use standard diff format, but ONLY include hunks for semantically different sections.
+    Mark each hunk with a comment explaining the behavioral difference.
+    
+    Example output:
+    ```diff
+    @@ Line 12: Error handling @@
+    - discounted_amount = txn['discount']  # Crashes if key missing
+    + discounted_amount = txn.get('discount', 0)  # Defaults to 0 if missing
+    
+    @@ Line 25: Division by zero @@
+    - avg = total / count  # Can crash
+    + avg = total / count if count > 0 else 0  # Safe handling
+    ```
+    
+    Provide ONLY the diff output with comments. No introduction or conclusion.
+  version: "1.0.1"
   description: "Generate final semantic diff visualization"
 
 # Model configuration
