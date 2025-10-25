@@ -63,7 +63,7 @@ echo "GOOGLE_API_KEY=your_api_key_here" > .env
 ### Basic Usage
 
 ```python
-from semantic_diff import app
+from semantic_diff import run_analysis
 
 code1 = """
 def factorial(n):
@@ -80,36 +80,7 @@ def factorial(n):
     return result
 """
 
-result = app.invoke({
-    "code1": code1,
-    "code2": code2,
-    "confidence": 0.0,
-    "differences": [],
-    "analysis": "",
-    "test_cases": [],
-    "iteration": 1,
-    "max_iterations": 5,
-    "coverage_gaps": []
-})
-```
-
-### Advanced Configuration
-
-```python
-# Adjust iteration limits and confidence thresholds
-initial_state = {
-    "code1": code1,
-    "code2": code2,
-    "confidence": 0.0,
-    "differences": [],
-    "analysis": "",
-    "test_cases": [],
-    "iteration": 1,
-    "max_iterations": 10,  # More thorough analysis
-    "coverage_gaps": []
-}
-
-result = app.invoke(initial_state)
+result = run_analysis(code1, code2, max_iterations=5, verbose=1)
 ```
 
 ## How It Works
@@ -227,7 +198,7 @@ The final output includes a Git-style diff highlighting semantically different s
 
 ### Performance Characteristics
 
-- **Typical runtime**: 30-90 seconds for 3-5 iterations
+- **Typical runtime**: 90-180 seconds for 3-5 iterations
 - **LLM calls**: 3N + 1 calls (N = number of iterations)
 - **Subprocess overhead**: ~100-200ms per test case
 - **Token usage**: ~2K-5K tokens per iteration
