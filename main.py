@@ -11,17 +11,7 @@ import ast
 import yaml
 import logging
 from datetime import datetime
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(f'semantic_diff_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+import argparse
 
 load_dotenv()
 
@@ -37,6 +27,59 @@ model = genai.GenerativeModel(
     )
 )
 
+# Global verbosity setting
+VERBOSITY = 1
+
+
+def setup_logging(verbosity):
+    """Configure logging based on verbosity level.
+    
+    Args:
+        verbosity (int): 0=silent, 1=low, 2=medium, 3=full
+    """
+    global VERBOSITY
+    VERBOSITY = verbosity
+    
+    # Map verbosity to log level
+    level_map = {
+        0: logging.CRITICAL,
+        1: logging.WARNING,
+        2: logging.INFO,
+        3: logging.DEBUG
+    }
+    
+    log_level = level_map.get(verbosity, logging.INFO)
+    
+    handlers = []
+    
+    # Always log to file (at DEBUG level for troubleshooting)
+    handlers.append(
+        logging.FileHandler(f'semantic_diff_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+    )
+    
+    # Only add console handler if not silent
+    if verbosity > 0:
+        handlers.append(logging.StreamHandler(sys.stdout))
+    
+    logging.basicConfig(
+        level=logging.DEBUG,  # File gets everything
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=handlers,
+        force=True
+    )
+    
+    # Set console handler to appropriate level
+    if verbosity > 0:
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+                handler.setLevel(log_level)
+    
+    return logging.getLogger(__name__)
+
+
+logger = logging.getLogger(__name__)
+
+
 class State(TypedDict):
     code1: str
     code2: str
@@ -47,6 +90,7 @@ class State(TypedDict):
     iteration: int
     max_iterations: int
     coverage_gaps: List[str]
+
 
 def execute_code_with_input(code, test_input, timeout=5):
     """Execute code with specific input in isolated subprocess and return output."""
@@ -102,7 +146,8 @@ except Exception as e:
 
 def analyze_code(state):
     """Analyze code for semantic differences and potential edge cases."""
-    logger.info(f"Starting analysis iteration {state['iteration']}/{state['max_iterations']}")
+    if VERBOSITY >= 3:
+        logger.info(f"Starting analysis iteration {state['iteration']}/{state['max_iterations']}")
     
     previous_analysis = f"\n\nPrevious analysis:\n{state['analysis']}" if state['analysis'] else ""
     coverage_info = f"\n\nCoverage gaps identified:\n{json.dumps(state['coverage_gaps'], indent=2)}" if state['coverage_gaps'] else ""
@@ -117,8 +162,9 @@ def analyze_code(state):
     try:
         response = model.generate_content(prompt)
         state["analysis"] = response.text
-        logger.info(f"Analysis complete. Response length: {len(response.text)} chars")
-        logger.debug(f"Analysis preview: {response.text[:200]}...")
+        if VERBOSITY >= 3:
+            logger.debug(f"Full analysis: {response.text}")
+            logger.info(f"Analysis complete. Response length: {len(response.text)} chars")
     except Exception as e:
         logger.error(f"Failed to generate analysis: {str(e)}", exc_info=True)
         raise
@@ -128,7 +174,8 @@ def analyze_code(state):
 
 def generate_tests(state):
     """Generate targeted test cases based on analysis."""
-    logger.info("Generating targeted test cases")
+    if VERBOSITY >= 3:
+        logger.info("Generating targeted test cases")
     
     # Extract function signature to understand parameters
     try:
@@ -163,11 +210,13 @@ def generate_tests(state):
             new_tests = new_tests["tests"]
         
         state["test_cases"].extend(new_tests)
-        logger.info(f"Generated {len(new_tests)} new test cases (total: {len(state['test_cases'])})")
+        if VERBOSITY >= 3:
+            logger.info(f"Generated {len(new_tests)} new test cases (total: {len(state['test_cases'])})")
         
     except (json.JSONDecodeError, ValueError) as e:
         logger.error(f"Failed to parse test cases: {str(e)}")
-        logger.debug(f"Response text: {response_text}")
+        if VERBOSITY >= 3:
+            logger.debug(f"Response text: {response_text}")
     except Exception as e:
         logger.error(f"Error generating tests: {str(e)}", exc_info=True)
     
@@ -176,7 +225,8 @@ def generate_tests(state):
 
 def run_tests(state):
     """Execute all test cases and compare results."""
-    logger.info(f"Running {len(state['test_cases'])} test cases")
+    if VERBOSITY >= 3:
+        logger.info(f"Running {len(state['test_cases'])} test cases")
     
     differences_found = []
     passed = 0
@@ -200,26 +250,35 @@ def run_tests(state):
             }
             differences_found.append(diff)
             failed += 1
-            logger.warning(f"Test {i+1} FAILED: {description}")
-            logger.debug(f"  Input: {test_input}")
-            logger.debug(f"  Code1: {result1}")
-            logger.debug(f"  Code2: {result2}")
+            
+            if VERBOSITY >= 2:
+                logger.warning(f"Test {i+1} FAILED: {description}")
+            if VERBOSITY >= 3:
+                logger.info(f"  Input: {test_input}")
+                logger.info(f"  Code1: {result1}")
+                logger.info(f"  Code2: {result2}")
         else:
             passed += 1
-            logger.debug(f"Test {i+1} passed: {description}")
+            if VERBOSITY >= 3:
+                logger.debug(f"Test {i+1} passed: {description}")
     
-    logger.info(f"Test results: {passed} passed, {failed} failed")
+    if VERBOSITY >= 3:
+        logger.info(f"Test results: {passed} passed, {failed} failed")
+    elif VERBOSITY >= 2 and failed > 0:
+        logger.warning(f"{failed} tests failed")
     
     if differences_found:
         state["differences"].extend(differences_found)
-        logger.info(f"Total differences found so far: {len(state['differences'])}")
+        if VERBOSITY >= 3:
+            logger.info(f"Total differences found so far: {len(state['differences'])}")
     
     return state
 
 
 def evaluate_coverage(state):
     """Adversarially evaluate test coverage and identify gaps."""
-    logger.info("Evaluating test coverage")
+    if VERBOSITY >= 3:
+        logger.info("Evaluating test coverage")
     
     prompt = PROMPTS['coverage_evaluation']['template'].format(
         analysis=state['analysis'],
@@ -238,7 +297,8 @@ def evaluate_coverage(state):
         
         gaps = json.loads(response_text)
         state["coverage_gaps"] = [g.get("gap", str(g)) for g in gaps]
-        logger.info(f"Identified {len(state['coverage_gaps'])} coverage gaps")
+        if VERBOSITY >= 3:
+            logger.info(f"Identified {len(state['coverage_gaps'])} coverage gaps")
         
         # Calculate confidence
         num_tests = len(state["test_cases"])
@@ -250,12 +310,14 @@ def evaluate_coverage(state):
         
         state["confidence"] = max(0.1, base_confidence - gap_penalty)
         
-        logger.info(f"Confidence score: {state['confidence']:.2%} "
-                   f"(tests: {num_tests}, gaps: {num_gaps}, diffs: {num_diffs})")
+        if VERBOSITY >= 3:
+            logger.info(f"Confidence score: {state['confidence']:.2%} "
+                       f"(tests: {num_tests}, gaps: {num_gaps}, diffs: {num_diffs})")
         
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse coverage gaps: {str(e)}")
-        logger.debug(f"Response text: {response_text}")
+        if VERBOSITY >= 3:
+            logger.debug(f"Response text: {response_text}")
         state["confidence"] = 0.6
     except Exception as e:
         logger.error(f"Error evaluating coverage: {str(e)}", exc_info=True)
@@ -268,47 +330,60 @@ def evaluate_coverage(state):
 def should_continue(state):
     """Decide whether to continue iterating or finalize."""
     if state["iteration"] >= state["max_iterations"]:
-        logger.info(f"Max iterations ({state['max_iterations']}) reached, finalizing")
+        if VERBOSITY >= 3:
+            logger.info(f"Max iterations ({state['max_iterations']}) reached, finalizing")
         return "finalize"
     
     if state["confidence"] > 0.85 and len(state["coverage_gaps"]) < 2:
-        logger.info(f"High confidence ({state['confidence']:.2%}) and good coverage achieved, finalizing")
+        if VERBOSITY >= 3:
+            logger.info(f"High confidence ({state['confidence']:.2%}) and good coverage achieved, finalizing")
         return "finalize"
     
     if state["confidence"] < 0.85:
-        logger.info(f"Confidence below threshold ({state['confidence']:.2%}), continuing iteration")
+        if VERBOSITY >= 3:
+            logger.info(f"Confidence below threshold ({state['confidence']:.2%}), continuing iteration")
         return "continue"
     
-    logger.info("Continuing iteration for better coverage")
+    if VERBOSITY >= 3:
+        logger.info("Continuing iteration for better coverage")
     return "finalize"
 
 
 def finalize(state):
     """Produce final report and request semantic diff from Gemini."""
-    logger.info("="*60)
-    logger.info("SEMANTIC DIFF ANALYSIS COMPLETE")
-    logger.info("="*60)
-    logger.info(f"Iterations: {state['iteration']}")
-    logger.info(f"Test cases run: {len(state['test_cases'])}")
-    logger.info(f"Differences found: {len(state['differences'])}")
-    logger.info(f"Final confidence: {state['confidence']:.2%}")
+    if VERBOSITY >= 2:
+        logger.info("="*60)
+        logger.info("SEMANTIC DIFF ANALYSIS COMPLETE")
+        logger.info("="*60)
+        logger.info(f"Iterations: {state['iteration']}")
+        logger.info(f"Test cases run: {len(state['test_cases'])}")
+        logger.info(f"Differences found: {len(state['differences'])}")
+        logger.info(f"Final confidence: {state['confidence']:.2%}")
     
     if state['differences']:
-        logger.warning(f"SEMANTIC DIFFERENCES DETECTED ({len(state['differences'])} total):")
-        for i, diff in enumerate(state['differences'], 1):
-            logger.warning(f"  {i}. {diff['description']}")
-            logger.info(f"     Input: {diff['test_input']}")
-            logger.info(f"     Code 1: {diff['code1_result']}")
-            logger.info(f"     Code 2: {diff['code2_result']}")
+        if VERBOSITY >= 2:
+            logger.warning(f"SEMANTIC DIFFERENCES DETECTED ({len(state['differences'])} total)")
+        
+        if VERBOSITY >= 2:
+            for i, diff in enumerate(state['differences'], 1):
+                logger.warning(f"  {i}. {diff['description']}")
+        
+        if VERBOSITY >= 3:
+            for i, diff in enumerate(state['differences'], 1):
+                logger.info(f"     Input: {diff['test_input']}")
+                logger.info(f"     Code 1: {diff['code1_result']}")
+                logger.info(f"     Code 2: {diff['code2_result']}")
     else:
-        logger.info("✓ No semantic differences detected (within tested scope)")
+        if VERBOSITY >= 2:
+            logger.info("✓ No semantic differences detected (within tested scope)")
     
-    if state['coverage_gaps']:
+    if state['coverage_gaps'] and VERBOSITY >= 3:
         logger.info("Coverage gaps identified:")
         for gap in state['coverage_gaps']:
             logger.info(f"  - {gap}")
     
-    logger.info("Requesting semantic diff from Gemini...")
+    if VERBOSITY >= 3:
+        logger.info("Requesting semantic diff from Gemini...")
 
     prompt = PROMPTS['semantic_diff']['template'].format(
         code1=state['code1'],
@@ -324,10 +399,12 @@ def finalize(state):
         diff_result = response.text.strip()
         
         if diff_result:
-            logger.info("\nSemantic Code Diff Result (from Gemini):\n")
-            logger.info(diff_result)
+            # At verbose=1, ONLY print the diff (no headers, no formatting)
+            if VERBOSITY >= 1:
+                print(diff_result)
         else:
-            logger.warning("No semantic diff result returned from Gemini")
+            if VERBOSITY >= 2:
+                logger.warning("No semantic diff result returned from Gemini")
     except Exception as e:
         logger.error(f"Failed to generate semantic diff: {str(e)}", exc_info=True)
 
@@ -356,8 +433,65 @@ graph.add_edge("finalize", END)
 app = graph.compile()
 
 
+def run_analysis(code1, code2, max_iterations=5, verbose=1):
+    """Run semantic diff analysis with specified verbosity.
+    
+    Args:
+        code1 (str): First code snippet
+        code2 (str): Second code snippet
+        max_iterations (int): Maximum analysis iterations
+        verbose (int): Verbosity level (0=silent, 1=low, 2=medium, 3=full)
+    
+    Returns:
+        dict: Analysis results including differences and confidence
+    """
+    global logger
+    logger = setup_logging(verbose)
+    
+    if verbose >= 3:
+        logger.info("Starting Semantic Code Diff Analyzer")
+        logger.info(f"Verbosity level: {verbose}")
+    
+    try:
+        result = app.invoke({
+            "code1": code1,
+            "code2": code2,
+            "confidence": 0.0,
+            "differences": [],
+            "analysis": "",
+            "test_cases": [],
+            "iteration": 1,
+            "max_iterations": max_iterations,
+            "coverage_gaps": []
+        })
+        
+        if verbose >= 3:
+            logger.info("Analysis completed successfully")
+        
+        return result
+        
+    except Exception as e:
+        logger.critical(f"Analysis failed: {str(e)}", exc_info=True)
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    logger.info("Starting Semantic Code Diff Analyzer")
+    parser = argparse.ArgumentParser(description='Semantic Code Diff Analyzer')
+    parser.add_argument(
+        '--verbose', '-v',
+        type=int,
+        choices=[0, 1, 2, 3],
+        default=1,
+        help='Verbosity level: 0=silent, 1=final output only, 2=basic info, 3=all details (default: 1)'
+    )
+    parser.add_argument(
+        '--max-iterations',
+        type=int,
+        default=5,
+        help='Maximum number of analysis iterations'
+    )
+    
+    args = parser.parse_args()
     
     code1 = """
 def factorial(n):
@@ -374,23 +508,4 @@ def factorial(n):
     return result
 """
 
-    logger.info("Code snippets loaded")
-    logger.debug(f"Code 1:\n{code1}")
-    logger.debug(f"Code 2:\n{code2}")
-    
-    try:
-        result = app.invoke({
-            "code1": code1,
-            "code2": code2,
-            "confidence": 0.0,
-            "differences": [],
-            "analysis": "",
-            "test_cases": [],
-            "iteration": 1,
-            "max_iterations": 5,
-            "coverage_gaps": []
-        })
-        logger.info("Analysis completed successfully")
-    except Exception as e:
-        logger.critical(f"Analysis failed: {str(e)}", exc_info=True)
-        sys.exit(1)
+    result = run_analysis(code1, code2, max_iterations=args.max_iterations, verbose=args.verbose)

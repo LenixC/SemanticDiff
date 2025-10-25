@@ -1,4 +1,4 @@
-from main import app
+from main import run_analysis
 
 code1 = """
 def process_sales_data(transactions):
@@ -61,14 +61,4 @@ def process_sales_data(transactions):
     }
 """
 
-result = app.invoke({
-    "code1": code1,
-    "code2": code2,
-    "confidence": 0.0,
-    "differences": [],
-    "analysis": "",
-    "test_cases": [],
-    "iteration": 1,
-    "max_iterations": 5,
-    "coverage_gaps": []
-})
+result = run_analysis(code1, code2, max_iterations=5, verbose=3)
