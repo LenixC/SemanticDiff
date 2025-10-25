@@ -40,7 +40,6 @@ def setup_logging(verbosity):
     global VERBOSITY
     VERBOSITY = verbosity
     
-    # Map verbosity to log level
     level_map = {
         0: logging.CRITICAL,
         1: logging.WARNING,
@@ -52,23 +51,20 @@ def setup_logging(verbosity):
     
     handlers = []
     
-    # Always log to file (at DEBUG level for troubleshooting)
     handlers.append(
         logging.FileHandler(f'semantic_diff_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
     )
     
-    # Only add console handler if not silent
     if verbosity > 0:
         handlers.append(logging.StreamHandler(sys.stdout))
     
     logging.basicConfig(
-        level=logging.DEBUG,  # File gets everything
+        level=logging.DEBUG,  
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=handlers,
         force=True
     )
     
-    # Set console handler to appropriate level
     if verbosity > 0:
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
