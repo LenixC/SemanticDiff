@@ -9,6 +9,19 @@ import sys
 import json
 import ast
 import yaml
+import logging
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(f'semantic_diff_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -37,6 +50,8 @@ class State(TypedDict):
 
 def execute_code_with_input(code, test_input, timeout=5):
     """Execute code with specific input in isolated subprocess and return output."""
+    logger.debug(f"Executing code with input: {test_input}")
+    
     wrapped_code = f"""
 import json
 import sys
@@ -69,19 +84,25 @@ except Exception as e:
         os.remove(temp_file_path)
         
         if result.returncode == 0 and result.stdout:
-            return json.loads(result.stdout.strip())
+            output = json.loads(result.stdout.strip())
+            logger.debug(f"Execution successful: {output}")
+            return output
+        
+        logger.warning(f"Execution failed with return code {result.returncode}: {result.stderr}")
         return {"result": None, "error": result.stderr or "Execution failed"}
     
     except subprocess.TimeoutExpired:
         os.remove(temp_file_path)
+        logger.warning(f"Execution timeout after {timeout}s for input: {test_input}")
         return {"result": None, "error": "Timeout"}
     except Exception as e:
+        logger.error(f"Execution error: {str(e)}", exc_info=True)
         return {"result": None, "error": str(e)}
 
 
 def analyze_code(state):
     """Analyze code for semantic differences and potential edge cases."""
-    print(f"\n[Iteration {state['iteration']}] Analyzing code with Gemini...")
+    logger.info(f"Starting analysis iteration {state['iteration']}/{state['max_iterations']}")
     
     previous_analysis = f"\n\nPrevious analysis:\n{state['analysis']}" if state['analysis'] else ""
     coverage_info = f"\n\nCoverage gaps identified:\n{json.dumps(state['coverage_gaps'], indent=2)}" if state['coverage_gaps'] else ""
@@ -93,15 +114,21 @@ def analyze_code(state):
         coverage_info=coverage_info
     )
     
-    response = model.generate_content(prompt)
-    state["analysis"] = response.text
-    print(f"Analysis: {response.text[:300]}...")
+    try:
+        response = model.generate_content(prompt)
+        state["analysis"] = response.text
+        logger.info(f"Analysis complete. Response length: {len(response.text)} chars")
+        logger.debug(f"Analysis preview: {response.text[:200]}...")
+    except Exception as e:
+        logger.error(f"Failed to generate analysis: {str(e)}", exc_info=True)
+        raise
+    
     return state
 
 
 def generate_tests(state):
     """Generate targeted test cases based on analysis."""
-    print("Generating targeted test cases...")
+    logger.info("Generating targeted test cases")
     
     # Extract function signature to understand parameters
     try:
@@ -109,7 +136,9 @@ def generate_tests(state):
         func_def = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)][0]
         func_name = func_def.name
         num_params = len(func_def.args.args)
-    except:
+        logger.debug(f"Detected function '{func_name}' with {num_params} parameters")
+    except Exception as e:
+        logger.warning(f"Failed to parse function signature: {str(e)}")
         func_name = "unknown"
         num_params = 1
     
@@ -119,37 +148,45 @@ def generate_tests(state):
         num_params=num_params
     )
     
-    response = model.generate_content(prompt)
-    response_text = response.text.strip()
-    
-    # Extract JSON from markdown code blocks if present
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0].strip()
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0].strip()
-    
     try:
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # Extract JSON from markdown code blocks if present
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
         new_tests = json.loads(response_text)
         if isinstance(new_tests, dict) and "tests" in new_tests:
             new_tests = new_tests["tests"]
+        
         state["test_cases"].extend(new_tests)
-        print(f"Generated {len(new_tests)} new test cases (total: {len(state['test_cases'])})")
+        logger.info(f"Generated {len(new_tests)} new test cases (total: {len(state['test_cases'])})")
+        
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"Failed to parse test cases: {e}")
-        print(f"Response text: {response_text}")
+        logger.error(f"Failed to parse test cases: {str(e)}")
+        logger.debug(f"Response text: {response_text}")
+    except Exception as e:
+        logger.error(f"Error generating tests: {str(e)}", exc_info=True)
     
     return state
 
 
 def run_tests(state):
     """Execute all test cases and compare results."""
-    print("Running test cases...")
+    logger.info(f"Running {len(state['test_cases'])} test cases")
     
     differences_found = []
+    passed = 0
+    failed = 0
     
     for i, test in enumerate(state["test_cases"]):
         test_input = test.get("input", [])
         description = test.get("description", "")
+        
+        logger.debug(f"Test {i+1}: {description} with input {test_input}")
         
         result1 = execute_code_with_input(state['code1'], test_input)
         result2 = execute_code_with_input(state['code2'], test_input)
@@ -162,56 +199,66 @@ def run_tests(state):
                 "code2_result": result2
             }
             differences_found.append(diff)
-            print(f"  ❌ Test {i+1} FAILED: {description}")
-            print(f"     Input: {test_input}")
-            print(f"     Code1: {result1}")
-            print(f"     Code2: {result2}")
+            failed += 1
+            logger.warning(f"Test {i+1} FAILED: {description}")
+            logger.debug(f"  Input: {test_input}")
+            logger.debug(f"  Code1: {result1}")
+            logger.debug(f"  Code2: {result2}")
         else:
-            print(f"  ✓ Test {i+1} passed: {description}")
+            passed += 1
+            logger.debug(f"Test {i+1} passed: {description}")
+    
+    logger.info(f"Test results: {passed} passed, {failed} failed")
     
     if differences_found:
         state["differences"].extend(differences_found)
+        logger.info(f"Total differences found so far: {len(state['differences'])}")
     
     return state
 
 
 def evaluate_coverage(state):
     """Adversarially evaluate test coverage and identify gaps."""
-    print("Evaluating test coverage...")
+    logger.info("Evaluating test coverage")
     
     prompt = PROMPTS['coverage_evaluation']['template'].format(
         analysis=state['analysis'],
         num_differences=len(state['differences'])
     )
     
-    response = model.generate_content(prompt)
-    response_text = response.text.strip()
-    
-    # Extract JSON from markdown code blocks
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0].strip()
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0].strip()
-    
     try:
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # Extract JSON from markdown code blocks
+        if "```json" in response_text:
+            response_text = response_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in response_text:
+            response_text = response_text.split("```")[1].split("```")[0].strip()
+        
         gaps = json.loads(response_text)
         state["coverage_gaps"] = [g.get("gap", str(g)) for g in gaps]
-        print(f"Identified {len(state['coverage_gaps'])} coverage gaps")
+        logger.info(f"Identified {len(state['coverage_gaps'])} coverage gaps")
         
-        # Calculate confidence: increases with tests, decreases with gaps
+        # Calculate confidence
         num_tests = len(state["test_cases"])
         num_gaps = len(state["coverage_gaps"])
         num_diffs = len(state["differences"])
         
-        base_confidence = min(0.95, num_tests / 15)  # Max at 15+ tests
-        gap_penalty = min(0.3, num_gaps * 0.05)      # -5% per gap, max -30%
+        base_confidence = min(0.95, num_tests / 15)
+        gap_penalty = min(0.3, num_gaps * 0.05)
         
         state["confidence"] = max(0.1, base_confidence - gap_penalty)
         
-        print(f"Confidence: {state['confidence']:.2f} (tests: {num_tests}, gaps: {num_gaps}, diffs: {num_diffs})")
+        logger.info(f"Confidence score: {state['confidence']:.2%} "
+                   f"(tests: {num_tests}, gaps: {num_gaps}, diffs: {num_diffs})")
         
     except json.JSONDecodeError as e:
-        print(f"Failed to parse coverage gaps: {e}")
+        logger.error(f"Failed to parse coverage gaps: {str(e)}")
+        logger.debug(f"Response text: {response_text}")
+        state["confidence"] = 0.6
+    except Exception as e:
+        logger.error(f"Error evaluating coverage: {str(e)}", exc_info=True)
         state["confidence"] = 0.6
     
     state["iteration"] += 1
@@ -221,45 +268,47 @@ def evaluate_coverage(state):
 def should_continue(state):
     """Decide whether to continue iterating or finalize."""
     if state["iteration"] >= state["max_iterations"]:
-        print("Max iterations reached.")
+        logger.info(f"Max iterations ({state['max_iterations']}) reached, finalizing")
         return "finalize"
     
     if state["confidence"] > 0.85 and len(state["coverage_gaps"]) < 2:
-        print("High confidence and good coverage achieved.")
+        logger.info(f"High confidence ({state['confidence']:.2%}) and good coverage achieved, finalizing")
         return "finalize"
     
     if state["confidence"] < 0.85:
-        print(f"Confidence too low ({state['confidence']:.2f}), continuing...")
+        logger.info(f"Confidence below threshold ({state['confidence']:.2%}), continuing iteration")
         return "continue"
     
+    logger.info("Continuing iteration for better coverage")
     return "finalize"
 
 
 def finalize(state):
     """Produce final report and request semantic diff from Gemini."""
-    print("\n" + "="*60)
-    print("SEMANTIC DIFF ANALYSIS COMPLETE")
-    print("="*60)
-    print(f"Iterations: {state['iteration']}")
-    print(f"Test cases run: {len(state['test_cases'])}")
-    print(f"Differences found: {len(state['differences'])}")
-    print(f"Final confidence: {state['confidence']:.2%}")
+    logger.info("="*60)
+    logger.info("SEMANTIC DIFF ANALYSIS COMPLETE")
+    logger.info("="*60)
+    logger.info(f"Iterations: {state['iteration']}")
+    logger.info(f"Test cases run: {len(state['test_cases'])}")
+    logger.info(f"Differences found: {len(state['differences'])}")
+    logger.info(f"Final confidence: {state['confidence']:.2%}")
     
     if state['differences']:
-        print("\n❌ SEMANTIC DIFFERENCES DETECTED:")
+        logger.warning(f"SEMANTIC DIFFERENCES DETECTED ({len(state['differences'])} total):")
         for i, diff in enumerate(state['differences'], 1):
-            print(f"\n  {i}. {diff['description']}")
-            print(f"     Input: {diff['test_input']}")
-            print(f"     Code 1: {diff['code1_result']}")
-            print(f"     Code 2: {diff['code2_result']}")
+            logger.warning(f"  {i}. {diff['description']}")
+            logger.info(f"     Input: {diff['test_input']}")
+            logger.info(f"     Code 1: {diff['code1_result']}")
+            logger.info(f"     Code 2: {diff['code2_result']}")
     else:
-        print("\n✓ No semantic differences detected (within tested scope)")
+        logger.info("✓ No semantic differences detected (within tested scope)")
     
     if state['coverage_gaps']:
+        logger.info("Coverage gaps identified:")
         for gap in state['coverage_gaps']:
-            print(f"  - {gap}")
+            logger.info(f"  - {gap}")
     
-    print("\nRequesting semantic diff from Gemini...")
+    logger.info("Requesting semantic diff from Gemini...")
 
     prompt = PROMPTS['semantic_diff']['template'].format(
         code1=state['code1'],
@@ -270,14 +319,17 @@ def finalize(state):
         test_cases=state['test_cases']
     )
     
-    response = model.generate_content(prompt)
-    diff_result = response.text.strip()
-    
-    if diff_result:
-        print("\nSemantic Code Diff Result (from Gemini):\n")
-        print(diff_result)
-    else:
-        print("\nNo semantic diff result returned from Gemini.")
+    try:
+        response = model.generate_content(prompt)
+        diff_result = response.text.strip()
+        
+        if diff_result:
+            logger.info("\nSemantic Code Diff Result (from Gemini):\n")
+            logger.info(diff_result)
+        else:
+            logger.warning("No semantic diff result returned from Gemini")
+    except Exception as e:
+        logger.error(f"Failed to generate semantic diff: {str(e)}", exc_info=True)
 
     return state
 
@@ -305,6 +357,8 @@ app = graph.compile()
 
 
 if __name__ == "__main__":
+    logger.info("Starting Semantic Code Diff Analyzer")
+    
     code1 = """
 def factorial(n):
     if n <= 1:
@@ -320,14 +374,23 @@ def factorial(n):
     return result
 """
 
-    result = app.invoke({
-        "code1": code1,
-        "code2": code2,
-        "confidence": 0.0,
-        "differences": [],
-        "analysis": "",
-        "test_cases": [],
-        "iteration": 1,
-        "max_iterations": 5,
-        "coverage_gaps": []
-    })
+    logger.info("Code snippets loaded")
+    logger.debug(f"Code 1:\n{code1}")
+    logger.debug(f"Code 2:\n{code2}")
+    
+    try:
+        result = app.invoke({
+            "code1": code1,
+            "code2": code2,
+            "confidence": 0.0,
+            "differences": [],
+            "analysis": "",
+            "test_cases": [],
+            "iteration": 1,
+            "max_iterations": 5,
+            "coverage_gaps": []
+        })
+        logger.info("Analysis completed successfully")
+    except Exception as e:
+        logger.critical(f"Analysis failed: {str(e)}", exc_info=True)
+        sys.exit(1)
